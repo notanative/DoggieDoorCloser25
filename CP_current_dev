@@ -1,0 +1,779 @@
+"""
+March 2025
+
+Test code for PWM controller for DC motor and solenoid
+With formatted display and INA260 readings printed to LCD
+
+
+April 2025
+
+Added TOF lidar sensors. Looks like the current sensor
+will not be that useful in this case because we need
+it to only measure the motor, which is fed a changing-
+polarity PWM signal. Might need to consider using using
+a shunt resistor and analog input?
+
+Assign negative motor speed for closing. Yes.
+Need to change address of one vl53 sensor. Done, tested.
+Check logical AND, NOT, time.time()
+Do we need to clear vl53 interrupts? Yes.
+How to wrap long if statements with multiple operators
+
+System Idle / Opening slow / Closing slow / Open done
+Door still
+Volts / mA
+Door position cm
+Obstacle height cm
+
+Bell sensor = hall analog signal, monitor for changes
+    If detected, check for obstacle height > 30cm then trigger open
+Lock sensor = hall analog signal, compare to locked/not locked threshold
+    Set/clear door_locked flag that is checked before open can be initiated
+Close complete sensor = photo interrupter, digital signal,
+    Use this to stop the close sequence, instead of door_pos_cm
+    Also check it when starting the close sequence?
+    Experiment with small-gap closure tests
+
+May25
+
+Added bell and lock sensors
+
+--> TO DO 5/6/25
+Brass or stainless steel ball for inside bell?
+Small neodymium magnet superglued to lock lever
+Better cable clips for power cord along door frame
+
+Consider computing a moving average door position, to be used
+in the check of whether the door is already essentially closed.
+The photointerruptor is important to stop the motor quickly
+at a very specific location, but when initiating a close, it's
+fine to check something that is updated more slowly.
+
+Add colors to the display so that "Closed" and "Locked" appear
+green and "Open" and "Unlocked" in red.
+Also color the Auto-open and Auto-close states in purple and yellow?
+
+5/9/25
+
+Added some logic to detect the door lock in the 2-sec loop and then
+turn off the auto-open. After this, auto-open didn't seem to want to
+work at all. Also had one weird crash that showed some kind of "general
+failure" on the screen but it booted up and ran fine after that. At one
+point I started testing it while running off the USB accidentally, and
+it actually ran the motor slowly but what tipped me off was that it
+wouldn't fire the solenoid. Not sure if pulling that much current
+backwards through the VUSB pin could have fried something?
+
+Anyway, seems we are very close to having all the pieces working as
+desired.
+
+5/11/25
+
+Looks like all major features are working, including the lock sensor and
+the auto-open bell sensor. The lock sensor was fixed by having it sample
+and set a threshold value at boot-up time, since it will move around with
+the 5v bus voltage due to the way the hall sensor works.
+
+Set up the screen to have the top 4 lines be the key user info, and then
+lines 5-6 are live sensor values useful for diagnostic observations. So,
+once it's reliable, we can enlarge the font to just show the first 4 lines
+I think.
+
+Noticed that the current location of the PWM outputs has them going high
+for a couple seconds when the device first powers on, before it executes
+the code that sets those pins as PWM outputs. This means that the solenoid
+and presumably the motor are powered on at full power briefly. I didn't
+realize this at first, and left it running a short bit of code reading the
+hall sensors for a few mins, during which time the solenoid got very hot.
+Like, I noticed this because I smelled something hot. Yikes.
+    --> So, this made me think that maybe there should be a thermal
+    cutoff switch mounted there as a safety precaution.
+    --> Also maybe we should move the PWM pins back to the digital output
+    lines and the analog inputs to the A0-A1 channels. This would seem to
+    avoid this default-high behavior that the analog pins have before they
+    are set to digital.
+
+I'd also like to get an LED that indicates visually when the solenoid is
+engaged to alert the user not to touch the door.
+
+Also like to rig up a piezo beeper that makes a brief sound when the bell
+is rung but auto-open is turned off.
+
+5/13-15/25
+
+Split up the screen info into a simplified page, which is the default,
+that only shows three lines with status info and then the on/off state
+of auto-close and auto-open. This allowed me to enlarge the font
+significantly to make it easier to read. Then, hitting the e-stop
+button while the door isn't moving will toggle into a second screen
+that has live output from all the sensors. Works nicely.
+
+Also added back the requirement that door_still == 1 for the bell
+trigger to work. My wife had reported that the open function was
+being triggered when she closed the door because the bell was wiggling.
+This seemed to fix the problem in some initial testing.
+
+Added beeper pin for when bell is rung when door is locked. 
+
+Revised lock threshold detection at startup to require the door to be LOCKED during
+boot-up, instead of unlocked. This logic is more protective from the perspective that
+a magnet needs to be brought near the sensor to allow the system to run.
+
+Revised loop timing to use a 100ms interval instead of the 100ms sleep at
+the end. This uses the supervisor ticks_ms value, as explained here:
+https://docs.circuitpython.org/en/latest/shared-bindings/supervisor/index.html#supervisor.ticks_ms
+
+Modified the door_still parameter to be based on an array that tracks the
+last 20 measurements (so 2 secs at 10Hz). This allows a comparison to be
+made at the 10Hz rate but looking back the same 2-sec period. Array setup
+was based on this moving average code, and the wrapping index calc was from
+this website:
+https://dirask.com/posts/JavaScript-positive-and-negative-around-index-wrapping-overlapping-to-address-items-in-array-pVyrnD
+
+# Moving average setup
+    MAind3 = 0
+    MAcount3 = 0
+    MAsize3 = 12   # Sample every 5 sec
+    Pm25Arr = [0] * MAsize3
+    Pm25Sum = 0
+    While True:
+        Pm25Sum -= Pm25Arr[MAind3]
+        Pm25Arr[MAind3] = aqdata["pm25 env"]
+        Pm25Sum += Pm25Arr[MAind3]
+        MAind3 += 1
+        MAind3 = MAind3 % MAsize3
+        if (MAcount3 < MAsize3):
+            MAcount3 += 1
+
+
+17-May25
+
+Rearranged some I/O pins and now everything is working fine without the 
+initial hit of the PWM devices at boot-up. The 10Hz loop timer seems
+to work well also. 
+
+The new array-based door_still check seems like noise is going to be an 
+issue. Using a threshold of 1cm across the 20 values produces a false 
+reading once every few seconds because of the noise in the measurement.
+I tried expanding it to 2cm every 2 sec, but this produces lots of true
+values even when the door is moving slowly. One idea might be to put
+the delta value into a second array, and then create an average of the
+last few of those? Was also thinking about putting a snoot around each
+of the sensors, like that we could limit the stray light getting in? Or
+could just tune an empirical value like 1.4 or something that works.
+
+Some other bugs: the red light comes on briefly when its done opening,
+maybe because the close_init flag seems very aggressive. This could be
+related to the door_still issue, though.
+
+Could use the photointerruptor to allow the open to be triggered, but
+then it couldn't trigger if it were open an inch or so.
+
+I also figured out that placing a piece of white paper on the edge of
+the door where the lidar is pointed reduces the sample-to-sample variation
+noiceably. Improving the S/N ratio at the source seems like a good idea,
+even though this is one more mod to the door itself. In the code, could
+also consider taking the difference in the sum of elements 1+2 and 19+20, 
+for instance, as the thing to test. 
+
+Add a counter of bell rings and opens and closes. Would be nice to store
+it in EEPROM but I think CP only offers the filesystem mounting stuff.
+
+5/20/25
+
+Noticed tonight that the display update rate was slow, like maybe 4-5Hz. 
+This made me wonder whether supervisor.ticks_ms() has the same behavior 
+described for time.monotonic(), where it slows by half every couple of
+hours. The info at docs.circuitpython.org seems to indicate they both
+use the same source timer. Also mentions that supervisor.ticks_ms is 
+not CP compatible, whatever that means. So then why are there no errors
+thrown when I use it?
+
+I'd like to try just letting it run full speed with no throttling, and 
+see how that goes. I think this would mean moving the door_still checks back
+into a 1 or 2-sec periodic check. Was also thinking about filters for the 
+position deltas used to check for still-- what about a minimum of a group of
+values? I saw the auto-open trigger itself tonight right after Sammy closed
+the door fairly hard. It was surprising that it could have tested positive
+for still immediately after it was moving quickly. So... need to get that 
+ironed out.
+
+5/21/25
+
+Removed the ticks timer from the main loop and went back to a delay at the 
+bottom, but shortened it to 0.05 to see how that performs. One concern with
+letting it run full speed is with the bell wiggle detection, since there 
+could potentially be many values over the threshold if the loop is running
+at 100Hz or more. So with speeding up the loop, I increased the wiggle 
+count to 5 required. 
+
+Also changed the way the auto-open initiates so that if an obst is detected, it 
+immediately resets the full 10-sec timer. Previously it would start closing 
+the door instantly when the obstacle was cleared, which felt a little aggressive.
+So now it will give the 10s grace period once the dog has moved. Also changed 
+the flashing neopixel color to be yellow instead of red when counting down 
+for auto-close. 
+ 
+Still trying to figure out an efficient way to change the color of single lines
+of text on the LCD. Maybe should ask the forum, or chatGPT?
+
+Consider adding back an array containing abs(door_pos_cm - prev_pos_cm) values
+and then summing or averaging those over like a 1-sec period. I still think it
+is important to be able to set door_still = false quickly.
+
+Also consider making subroutines for ramping the speed up and down over like
+two seconds or something. The higher speed motion is nice but there is 
+notable bouncing when speeds change abruptly. Need to think about how to create
+the small delays between speed changes.
+
+I was reading about time.monotonic_ns() on the adafruit forums, and it apparently
+doesn't suffer from the slowing problem. It uses 64-bit ints, so will go for many 
+years without wrapping.
+
+5/23/25
+
+Drafted a speed_ramp subroutine that will hopefully provide a nicer way to get to 
+and from high-speed movement, and may obviate some of the speed-change steps that
+are part of the main loop. 
+
+It continues to have the loop iteration slow down to half or 1/3 speed on me. 
+This morning I wanted to reflash an older "working" version of the code from a
+couple weeks ago, before this problem started. I did have to make one tweak though, 
+which was to fix up the pin assignments since it was still using A0-A2 for the PWM 
+outputs, plus the lock sensor was moved and the beeper output was added. So I went
+ahead, thinking it would have to work right. But then I immediately observed it 
+happening during a test of the auto-open operation just moments after I rebooted 
+it.
+
+Since the inputs were an obvious culprit, I removed the lock sensor and beeper pins
+and fixed up some code here and there to make it run ok. Then tried it again and 
+it seemed to work normally over several tests. So I will focus my troubleshooting
+on the beeper and lock pins. I know that Wifi conflicts with ADC2, which A0-A4
+are using. Perhaps I need to explicitly turn off Wifi?
+
+Don't change too many things at once. Let this small change be tested before adding
+back the loop timing features.
+
+5/28/25
+
+Observed the loop-slowing behavior shortly after reflashing the older version without
+the ADC2 inputs, which suggests that isn't the issue. I'm now guessing it has to
+do with one of the drivers or other program structures I'm using that is filling
+up the RAM or something else untidy. Multiple arrows point to convering this to 
+Arduino code and flashing. 
+
+In the meantime, though, I'd like to tweak a few other details:
+
+- Implement the speed ramper 
+- Get a better loop timer going?
+- Optimize the detection of door_still condition (like averaging a few points)
+- Consider having it measure the close_limit_reading during boot-up
+   [Just implemented this, so it's going to check a rough range and give an error
+   if off-spec. Other option is to check that the pre-set constant minus the current
+   reading is close to zero. Pros and cons of both. Might be nice to have a menu 
+   option to reset it occasionally?]
+   
+Some code I had that would beep if the bell was rung when the door was locked or 
+auto-open was disabled. Problem is, the current code doesn't watch the bell sensor
+unless those checks are already passing. Plus, it would only work when the device
+was on, which wouldn't be all the time, theoretically, so it would not be 100% 
+consistent in its messaging. 
+    else:
+        # Make beeping sound to alert the dog the door is locked?
+        beeper_pin.value = True
+        time.sleep(0.5)
+        beeper_pin.value = False
+        return "Door locked"
+
+Some checks removed from the slow loop during the array upgrade
+            # See if door hasn't moved recently
+            if abs(prev_pos_cm - door_pos_cm) < 1:
+                door_still = 1
+            else:
+                door_still = 0
+            prev_pos_cm = door_pos_cm
+
+
+5/29/25
+
+Coded up several changes over the past 24hrs, including:
+
+- 10 Hz loop timer using nanoseconds for most checks but moved a few outside to run faster
+- Revised array-based door position calcs
+- Implemented speed ramper for auto-stop and start
+
+"""
+import time
+import board
+from digitalio import DigitalInOut, Direction, Pull
+import analogio
+import pwmio
+import terminalio
+from adafruit_display_text import label
+# import adafruit_ina260
+import adafruit_vl53l4cd
+import adafruit_vl53l1x
+import neopixel
+# import traceback
+
+# wifi.radio.enabled = False
+
+pixel = neopixel.NeoPixel(board.NEOPIXEL, 1)
+pixel.brightness = 0.5
+
+display = board.DISPLAY
+line1 = "System IDLE"
+
+i2c = board.I2C()  # uses board.SCL and board.SDA
+# ina260 = adafruit_ina260.INA260(i2c)
+
+# Set up user buttons
+button0 = DigitalInOut(board.D0)
+button0.switch_to_input(pull=Pull.UP)
+button1 = DigitalInOut(board.D1)
+button1.switch_to_input(pull=Pull.DOWN)
+button2 = DigitalInOut(board.D2)
+button2.switch_to_input(pull=Pull.DOWN)
+
+# Set up TOF distance sensors
+xshut = DigitalInOut(board.D5)
+xshut.direction = Direction.OUTPUT
+xshut.value = False  # Output LOW to shut down VL53L1X
+vl53_door = adafruit_vl53l4cd.VL53L4CD(i2c)
+vl53_door.set_address(0x30)  # Change address of VL53L4CD
+vl53_door.timing_budget = 50
+xshut.value = True  # Turn VL53L1X back on
+vl53_obst = adafruit_vl53l1x.VL53L1X(i2c)
+vl53_obst.distance_mode = 2  # Set long-range distance mode
+vl53_obst.timing_budget = 50
+vl53_obst.start_ranging()
+vl53_door.start_ranging()
+
+# Set up other sensors
+is_open_sensor = DigitalInOut(board.D6)
+is_open_sensor.direction = Direction.INPUT
+bell_sensor = analogio.AnalogIn(board.D9)
+lock_sensor = analogio.AnalogIn(board.A5)
+# beeper_pin = DigitalInOut(board.A4)
+# beeper_pin.direction = Direction.OUTPUT
+# beeper_pin.value = False
+
+# Set up PWM pins
+motor_f = pwmio.PWMOut(board.D10, frequency=24000)
+motor_r = pwmio.PWMOut(board.D11, frequency=24000)
+solenoid = pwmio.PWMOut(board.D12, frequency=24000)
+
+# Fixed values determined during initial setup
+open_limit_reading = 19.0  # VL53L4CD mounted to right-side door frame
+close_limit_reading = 70.5  # VL53L4CD mounted to right-side door frame
+obst_clear_reading = 205.0  # VL53L1X mounted to top of door frame
+
+# Defined operating limits
+# open_limit_cm = close_limit_reading - open_limit_reading
+open_limit_cm = 32.0  # Fully open is not necessary to fit the dog
+obst_limit_cm = 20.0  # Should detect a dog but avoid false positives
+auto_close_timeout = 10.0  # Seconds to wait before auto-close starts
+bell_thresh = 1000  # Reading differential required to register a bell wiggle
+
+# Initial values of variables being updated continuously
+door_pos_cm = 30.0  # door's location relative to closed = 0cm
+obst_height_cm = 0.0  # approximate height of an obstacle from floor
+pwm_speed = 0  # range from -100 to +100, percent of full speed
+motor_spd = 0  # range from -100 to +100, percent of full speed
+prev_pos_cm = door_pos_cm
+button_held = 0
+door_locked = 1
+door_still = 0
+auto_close_init = 0
+start_time = time.time()  # marks when door starts moving
+slow_check = start_time
+line1d = " "
+line2d = " "
+line3d = " "
+auto_close_on = 0
+auto_open_on = 0
+pixel_toggle = 0
+was_just_closed = 0
+bell_moving = 0
+bell_sensor_prev = 0
+detail_disp = 0
+arr_index = 0
+arr_size = 10   # Keep last 20 positions
+door_pos_arr = [0] * arr_size
+loop_start_ns = time.monotonic_ns() + 10 ** 8  # Adding 0.1 secs in nanosecs
+
+# ------------------ FUNCTION DEFINITIONS ------------------
+
+def speed_ramp(from_speed, to_speed, ramp_time):
+    global motor_spd
+    steps = 10
+    speed_step = (to_speed - from_speed) / steps
+    time_step = ramp_time / steps  # in seconds
+    for step in range(1, steps + 1):
+        new_speed = from_speed + step * speed_step
+        if new_speed > 0:
+            motor_r.duty_cycle = 0
+            motor_f.duty_cycle = int((new_speed / 105) * 65535)
+            pixel.fill((0, 255, 0))
+        elif new_speed < 0:
+            motor_f.duty_cycle = 0
+            motor_r.duty_cycle = int((-new_speed / 105) * 65535)
+            pixel.fill((255, 0, 0))
+        else:
+            motor_f.duty_cycle = 0
+            motor_r.duty_cycle = 0
+            pixel.fill((0, 0, 0))
+        time.sleep(time_step)
+    motor_spd = to_speed
+
+
+def update_pwm(pwm_speed):
+    if pwm_speed > 0:
+        motor_r.duty_cycle = 0
+        motor_f.duty_cycle = int(pwm_speed / 105 * 65536)
+        pixel.fill((0, 255, 0))
+        return "Open at {}%".format(pwm_speed)
+    elif pwm_speed < 0:
+        motor_f.duty_cycle = 0
+        motor_r.duty_cycle = int(pwm_speed / -105 * 65536)
+        pixel.fill((255, 0, 0))
+        return "Close at {}%".format(-1 * pwm_speed)
+    else:
+        motor_f.duty_cycle = 0
+        motor_r.duty_cycle = 0
+        pixel.fill((0, 0, 0))
+        return "Stopped"
+
+
+def update_disp():
+    if detail_disp == 1:
+        text = line1d + "\n" + line2d + "\n" + line3d 
+        text += "\nUnlock Thr: {}".format(round(unlock_thresh)) 
+        text += "\nDoor Speed: {}".format(round(delta1, 1)) 
+        text += "\nDoor Still: {}".format(door_still)
+        text_area = label.Label(
+            terminalio.FONT,
+            text=text,
+            color=0xFFFFFF,
+            line_spacing=0.95, scale=2,  # Allows 20 chars x 6 lines of readable text
+            x=0, y=8,  # Coords from top left corner of disp to center left edge of first char
+        )
+    else:
+        text = line1 + "\n" + line2 + "\n" + line3
+        text_area = label.Label(
+            terminalio.FONT,
+            text=text,
+            color=0xFFFFFF,
+            line_spacing=1.0, scale=3,  # Allows 12 chars x 4 lines of readable text
+            x=0, y=12,  # Coords from top left corner of disp to center left edge of first char
+        )
+    display.root_group = text_area
+
+
+def start_close():
+    # global motor_spd
+    global start_time
+    if is_open_sensor.value is True:  # True means door isn't closed
+        solenoid.duty_cycle = int(0.95 * 65536)
+        time.sleep(0.5)  # delay to settle the latch
+        if door_pos_cm > 15:
+            speed_ramp(motor_spd, -80, 1)
+        else:
+            speed_ramp(motor_spd, -30, 1)
+        # motor_spd = -30
+        start_time = time.time()
+        return "Closing..."
+        # return update_pwm(motor_spd)
+    else:  # This will normally never happen without a manual trigger
+        return "Door closed" 
+
+
+def start_open():
+    # global motor_spd
+    global start_time
+    if door_pos_cm < (open_limit_cm - 5):  # Skip if already very close to fully open
+        if lock_sensor.value > unlock_thresh:  # Double-check unlocked state
+            solenoid.duty_cycle = int(0.95 * 65536)
+            time.sleep(0.5)  # delay to settle the latch
+            if door_pos_cm < (open_limit_cm - 15):
+                speed_ramp(motor_spd, 80, 1)
+            else:
+                speed_ramp(motor_spd, 30, 1)
+            # motor_spd = 30
+            start_time = time.time()
+            return "Opening..."
+            # return update_pwm(motor_spd)
+    else:
+        return "Door open"
+
+
+# ------------------ INITIAL SENSOR CHECKS ------------------
+
+"""
+Door must be CLOSED & LOCKED at boot-up to pass the checks.
+Lock sensor threshold value gets set from live readings.
+When LOCKED, magnet is away from Hall sensor so its output
+  is closer to Vdd/2, making around 25k ADC reading. The reading
+  increases to around 26500 when unlocked and magnet is nearer.
+Also checks that the photointerruptor and door position sensor
+  read logically at the closed position.
+If any of these fail, the screen displays a msg and the user
+  must click B0 to proceed, though nothing actually prevents 
+  the system being used with malfunctioning sensors.
+"""
+unlock_thresh = 0
+door_pos_cm = 0
+j = 0
+error_flag = 0
+for n in range(10):
+    unlock_thresh += lock_sensor.value
+    if vl53_door.data_ready:
+        vl53_door.clear_interrupt()  # Why do we need this?
+        door_pos_cm += (close_limit_reading - vl53_door.distance)
+        j += 1
+    time.sleep(0.1)
+# Add an offset from the average to create threshold (above = locked)
+unlock_thresh = unlock_thresh / 10 + 700
+door_pos_cm = door_pos_cm / j  # divide by a counter in case we didn't get all 10
+if (
+    lock_sensor.value > 26000  # Means it was probably unlocked
+    or lock_sensor.value > unlock_thresh  # Unlock thresh calcs didn't work
+):
+    line1 = "!Chk lock"
+    error_flag = 1
+elif door_pos_cm < -1 or door_pos_cm > 1:
+    line1 = "!Chk lidar"
+    error_flag = 1
+elif is_open_sensor.value is True:  # Door may be open
+    line1 = "!Chk stop sw"
+    error_flag = 1
+else:  # If everything is ok, we end up here
+    line1 = "Ready!"
+    line2 = "Closer: OFF"
+    line3 = "Opener: OFF"
+    update_disp()
+
+if error_flag:
+    line2 = "or press B0"
+    line3 = "to ignore"
+    update_disp()
+    while button0.value:
+        time.sleep(0.1)
+
+
+while True:  # ------------------ MAIN LOOP ------------------
+
+    # ------------------ THIS SECTION RUNS AT ~10Hz ------------------
+    if time.monotonic_ns() > loop_start_ns:
+        loop_start_ns = time.monotonic_ns() + 10 ** 8  # Adding 0.1 secs in nanosecs
+
+        # --- Update LIDAR values, which sometimes throws an error ---
+        try:
+            if vl53_door.data_ready:
+                vl53_door.clear_interrupt()  # Why do we need this?
+                door_pos_cm = round(close_limit_reading - vl53_door.distance, 1)
+            if vl53_obst.data_ready:
+                vl53_obst.clear_interrupt()  # Why do we need this?
+                # next line keeps throwing unsupported types error
+                obst_height_cm = round(obst_clear_reading - vl53_obst.distance, 1)
+        except Exception as e:
+            # print(traceback.print_exception(e))  # Sends error to serial terminal
+            # raise  # Probably unnecessary if errors are infrequent
+            pass
+
+        # --- Update door position array and calculate displacements ---
+        door_pos_arr[arr_index] = door_pos_cm
+        delta1 = door_pos_arr[arr_index] - door_pos_arr[((arr_index + arr_size - 9) % arr_size + arr_size) % arr_size]
+        delta2 = door_pos_arr[((arr_index + 1) % arr_size + arr_size) % arr_size] - door_pos_arr[((arr_index + arr_size - 9) % arr_size + arr_size) % arr_size]
+        # delta3 = door_pos_arr[((arr_index + 2) % arr_size + arr_size) % arr_size] - door_pos_arr[((arr_index + arr_size - 8) % arr_size + arr_size) % arr_size]
+        arr_index += 1
+        arr_index = arr_index % arr_size
+        delta1 = abs(delta1 + delta2) / 3  # Create average of last two displacements
+        # delta1 = abs(delta1 + delta2 + delta3) / 3  # Create average of last three displacements
+        if delta1 < 1:  # Less than 1cm in last couple seconds
+            door_still = 1
+        else:
+            door_still = 0
+            auto_close_init = 0  # Cancel this immediately
+
+        # --- Update display variables with new data --- 
+        if detail_disp == 1:
+            if is_open_sensor.value:
+                if door_locked:
+                    line1d = "Open   / Locked"
+                else:
+                    line1d = "Open   / Unlocked"
+            else:
+                if door_locked:
+                    line1d = "Closed / Locked"
+                else:
+                    line1d = "Closed / Unlocked"
+            line2d = "D: {:5.1f} / O: {:5.1f}".format(door_pos_cm, obst_height_cm)
+            line3d = "B: {:5} / L: {}".format(bell_sensor.value - bell_sensor_prev, lock_sensor.value)
+            #        12345678901234567890
+            #        B: -3500 / O: 26500
+
+        # --- Do some less urgent checks once per 2 sec --- 
+        if time.time() > slow_check + 2:
+            slow_check = time.time()
+
+            # More checks to initiate auto-close sequence
+            if (
+                auto_close_on == 1
+                and door_still == 1
+                and door_pos_cm > 1  # Try to prevent repeated attempts to re-close
+                and is_open_sensor.value is True
+                and obst_height_cm < obst_limit_cm
+            ):
+                if auto_close_init == 0:
+                    still_time = time.time()
+                    auto_close_init = 1
+            else:
+                auto_close_init = 0
+
+            # Catch case of motor running too long, which might be a problem
+            if motor_spd != 0 and time.time() > start_time + 20:  # 20-second max runtime
+                motor_spd = 0
+                update_pwm(motor_spd)
+                time.sleep(0.3)
+                solenoid.duty_cycle = 0
+                line1 = "Run limit!"
+                auto_close_on = 0
+                line2 = "Closer: OFF"
+                auto_open_on = 0
+                line3 = "Opener: OFF"
+
+            # Update status of door lock
+            if lock_sensor.value > unlock_thresh:
+                door_locked = 0
+            else:
+                door_locked = 1
+                auto_open_on = 0
+                line3 = "Opener: OFF"
+
+            # Clear close complete msg when door is re-opened
+            if is_open_sensor.value is not True:
+                # line1 = "Door fully closed"
+                was_just_closed = 1
+            elif was_just_closed == 1:
+                line1 = " "
+                was_just_closed = 0
+
+        # --- When door is fully open, stop motor and release latch --- 
+        if motor_spd > 0 and door_pos_cm > open_limit_cm:
+            speed_ramp(motor_spd, 0, 0.5)
+            time.sleep(0.3)
+            solenoid.duty_cycle = 0
+            bell_moving = 0
+            line1 = "Open done"
+            # update_disp()
+
+        # --- Stop for obstacles when door is closing --- 
+        if motor_spd < 0 and obst_height_cm > obst_limit_cm:
+            motor_spd = 0
+            update_pwm(motor_spd)
+            time.sleep(0.3)
+            solenoid.duty_cycle = 0
+            auto_close_init == 0  # Resets 10-sec timer for auto-close
+            line1 = "Obst stop"
+            # update_disp()
+
+        # --- Slow closing speed when <4cm left
+        if motor_spd < -30 and door_pos_cm < 4:
+            speed_ramp(motor_spd, -30, 1)
+            line1 = "Close slow"
+
+        # --- Initiate auto-open if bell was wiggled --- 
+        if (
+            auto_open_on == 1
+            and door_still == 1
+            and abs(bell_sensor.value - bell_sensor_prev) > bell_thresh
+        ):
+            bell_moving = bell_moving + 1
+            if bell_moving > 2:  # Require a few sequential wiggles to avoid false triggers
+                line1 = start_open()
+        else:
+            bell_moving = 0
+        bell_sensor_prev = bell_sensor.value
+
+        # --- Initiate auto-close after timeout --- 
+        if auto_close_init == 1:
+            if time.time() - still_time > auto_close_timeout:
+                auto_close_init = 0
+                if obst_height_cm < obst_limit_cm:
+                    line1 = start_close()
+                else:
+                    line1 = "Obst wait"
+
+        update_disp()
+
+        # Flash NP red when counting down for auto-close
+        if auto_close_on == 1 and auto_close_init == 1 and motor_spd == 0:
+            if pixel_toggle == 0:
+                pixel.fill((255, 255, 0))
+                pixel_toggle = 1
+            else:
+                pixel.fill((0, 0, 0))
+                pixel_toggle = 0
+        # Turn off NP if door moves during countdown
+        elif motor_spd == 0:  # Only turn off NP if motor is OFF
+            pixel.fill((0, 0, 0))
+
+        # time.sleep(0.1)
+
+    # ------------------ THIS SECTION RUNS AT MAX SPEED ------------------
+    # Button D0 does emergency stop (Pull.UP, active LOW)
+    if not button0.value and button_held == 0:
+        button_held = 1
+        if motor_spd != 0:
+            motor_spd = 0
+            update_pwm(motor_spd)
+            time.sleep(0.3)
+            solenoid.duty_cycle = 0
+            auto_close_on = 0  # Turn-off auto-close to avoid surprises
+            line1 = "User stop"
+        else:
+            if detail_disp == 0:
+                detail_disp = 1
+            else:
+                detail_disp = 0
+        update_disp()
+    # Button D1 toggles auto-close (Pull.DOWN, active HIGH)
+    elif button1.value and button_held == 0:
+        button_held = 1
+        # auto_close_on = (auto_close_on + 1) % 2
+        if auto_close_on == 0:
+            auto_close_on = 1
+            line2 = "Closer: ON"
+        else:
+            auto_close_on = 0
+            line2 = "Closer: OFF"
+        update_disp()
+    # Button D2 toggles auto-open (Pull.DOWN, active HIGH)
+    elif button2.value and button_held == 0:
+        button_held = 1
+        if auto_open_on == 0:
+            auto_open_on = 1
+            line3 = "Opener: ON"
+        else:
+            auto_open_on = 0
+            line3 = "Opener: OFF"
+        update_disp()
+    # Clear button flag if no buttons are being held
+    if button0.value and not button1.value and not button2.value:
+        button_held = 0
+        
+    # --- When door is fully closed, stop motor and release latch --- 
+    if motor_spd < 0 and is_open_sensor.value is False:
+        motor_spd = 0
+        update_pwm(motor_spd)
+        time.sleep(0.3)
+        solenoid.duty_cycle = 0
+        # After closing, run belt back a tiny bit to make sure latch fully releases
+        time.sleep(0.3)
+        update_pwm(10)
+        time.sleep(0.5)
+        update_pwm(0)
+        line1 = "Close done"
+        # update_disp()
+    
